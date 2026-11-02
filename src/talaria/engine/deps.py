@@ -337,6 +337,16 @@ def evaluate_predictive(findings: Sequence[DepFinding], target_os: str,
                 verdict = "ok"
         elif dep.kind == "config_key":
             verdict = "action" if dep.detail.get("model_snapshot") else "ok"
+        elif dep.kind == "symlink":
+            # A link whose target is not inside HERMES_HOME cannot be packed (bundle
+            # hardening rejects symlink members), so the skill only works on the new
+            # machine if that path exists there. Out-of-tree repos almost never do.
+            if dep.detail.get("in_home"):
+                verdict = "ok"
+            elif dep.detail.get("absolute"):
+                verdict = "action"
+            else:
+                verdict = "action"
         finding.verdicts[target_os] = verdict
 
 
@@ -412,4 +422,42 @@ def collect_all(scan_result, skills_root: Path) -> List[DepFinding]:
             prefix = Path(scan_result.identity.root)
             phome = prefix if not art.profile else prefix / "profiles" / art.profile
             findings.extend(skill_dependencies(phome / skill_rel, art.id))
+    findings.extend(symlink_dependencies(scan_result))
     return findings
+
+
+def symlink_dependencies(scan_result) -> List[DepFinding]:
+    """One finding per symlink whose target sits outside HERMES_HOME.
+
+    A symlinked skill works on the source machine because its target is right there.
+    The bundle cannot carry the target (hardening rejects symlink members, so only the
+    link record travels), which means on a new machine the skill is dangling unless
+    that path happens to exist. Hermes' own ``profile export`` has the same hole; the
+    difference is that Talaria tells you about it.
+    """
+    out: List[DepFinding] = []
+    root = Path(scan_result.identity.root)
+    for art in scan_result.artifacts:
+        for fe in art.files:
+            if not fe.is_symlink or fe.link_target is None:
+                continue
+            target = fe.link_target
+            if target.startswith("/") or target.startswith("~"):
+                resolved = Path(target).expanduser()
+            else:
+                resolved = (root / Path(fe.home_rel).parent / target)
+            try:
+                in_home = resolved.resolve().is_relative_to(root.resolve())
+            except (OSError, ValueError):
+                in_home = False
+            if in_home:
+                continue
+            dep = Dependency(kind="symlink", name=fe.home_rel,
+                             detail={"target": target, "in_home": False,
+                                     "absolute": target.startswith("/") or
+                                                 target.startswith("~")})
+            out.append(DepFinding(
+                artifact_id=art.id, dependency=dep, evidence=f"{fe.home_rel} -> {target}",
+                remediation="install the target repo on the new machine, or re-point the "
+                            "link; until then this skill is dangling and will not load"))
+    return out
