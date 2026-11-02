@@ -51,6 +51,10 @@ version, so any tool vintage can identify any bundle and print the right message
   a disclosed consent.
 - `vault` — when present: scrypt parameters, cipher, per-member plain hash/size, and
   an HMAC over the section.
+- `symlinks[]` — one record per symlink: `root_rel`, `home_rel`, `target`. A link has
+  no content, so it has no payload member and no hash; apply recreates it, verifies it
+  by target, and rollback restores it. Readers older than 1.1 ignore this key (see
+  reading rules) and simply recreate nothing.
 - `hash_semantics` — the separator/collation the skill dir-hashes were computed under
   (cross-OS rebaselining needs it).
 - `capture_mode` — quiesced | live.

@@ -320,10 +320,29 @@ def _skew_gate(manifest: dict, target_home: Path) -> Tuple[str, Gate, bool]:
 
 
 def _version_tuple(v: str) -> tuple:
+    """Comparable ``(major, minor, patch)`` from any Hermes version spelling.
+
+    Hermes reports several shapes: ``0.21.5`` (stamp baseVersion), ``0.22.4+7.gabc`` (stamp
+    displayVersion), ``0.22.5+canary.20261028T064834Z`` (canary tag), and ``v2026.8.13``
+    (release date). Only the release number compares: the ``+<distance>.g<sha>`` build
+    suffix must be dropped, or ``0.22.4+7.gabc`` would read as ``(0, 22, 47)`` and beat a
+    plain ``0.22.5`` it is actually BEHIND.
+
+    Two normalisations keep comparisons honest:
+    * ``vYYYY.M.D`` (a RELEASE DATE, seen when a checkout carries no version) would otherwise
+      read as ``(2026, 8, 13)`` and beat every ``0.x`` release, so a leading 4-digit year
+      collapses to ``0`` — an unknown version must never outrank a known one.
+    * the tuple is padded to a fixed 3 fields, because ``(0, 22) > (0, 22, 0)`` is False in
+      Python even though the versions are equal.
+    """
+    head = str(v).strip().lstrip("vV").split("+", 1)[0].split("-", 1)[0]
     parts = []
-    for piece in str(v).split("."):
+    for piece in head.split("."):
         digits = "".join(ch for ch in piece if ch.isdigit())
         parts.append(int(digits) if digits else 0)
+    if len(parts) > 1 and parts[0] >= 1000:
+        parts[0] = 0  # YYYY.M.D release date, not a semver
+    parts = (parts + [0, 0, 0])[:3]
     return tuple(parts)
 
 

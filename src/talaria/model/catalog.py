@@ -65,7 +65,7 @@ EXCLUSION_REGISTRY: Tuple[Exclusion, ...] = (
               "copied (arch-specific; the checkout is recorded as ref+patch instead)",
               "state §2.9; install §12"),
     Exclusion("logs-caches",
-              ("logs/**", "cache/**", "image_cache/**", "audio_cache/**", "document_cache/**",
+              ("logs/**", "image_cache/**", "audio_cache/**", "document_cache/**",
                "video_cache/**", "images/**", "browser_screenshots/**",
                "browser_recordings/**", "chrome-debug/**", "sandboxes/**", "pastes/**",
                "disk-cleanup/**", "tmp/**", ".hermes_history", "telemetry/**"),
@@ -115,6 +115,32 @@ EXCLUSION_REGISTRY: Tuple[Exclusion, ...] = (
     Exclusion("config-debris",
               ("config.yaml.corrupt.*.bak",),
               "capture", "corruption debris upstream leaves behind", "state §2.1"),
+    # ---- Hermes 0.21/0.22 additions -------------------------------------------------
+    # ``hermes_cli/home_data_layout.py`` declares these "belong to this machine": dependency
+    # generations, downloaded tools and partial transfers. Root-only, exactly as upstream
+    # scopes it (a skill's own ``tools/`` or ``cache/`` is user data).
+    Exclusion("pm-runtime",
+              ("installs/**",),
+              "capture", "managed dependency generations rebuilt by `hermes pm` on the target; "
+              "multi-GB, arch-specific", "home_data_layout.py PM_RUNTIME_ROOT_DIRS"),
+    Exclusion("runtime-tools",
+              ("tools/**",),
+              "capture", "downloaded toolchain (node/npm/ffmpeg/chromium/cua-driver); "
+              "re-provisioned per machine", "home_data_layout.py PM_RUNTIME_ROOT_DIRS"),
+    Exclusion("browser-profile",
+              ("browser-profile/**", "browser_profiles/**"),
+              "capture", "live Chromium CDP profile: locked SQLite mid-run and a Cookies/Login "
+              "Data credential store; regenerated on next launch",
+              "backup.py _EXCLUDED_DIRS"),
+    Exclusion("retired-wal-capture",
+              ("state.db.retired-wal-*/**", "state.db.pre-update-emergency-*"),
+              "capture", "operator recovery artifact; must move whole or not at all, so it "
+              "never rides along with a fresh snapshot", "backup.py _EXCLUDED_PREFIXES"),
+    Exclusion("serve-restart",
+              (".update_exit_code", ".update_response", ".update_output.txt", ".update_pending*",
+               ".update_prompt.json", ".restart_*", "serve_restart_pending/**"),
+              "capture", "update-handshake leftovers for THIS machine's update run",
+              "state §5 update markers"),
 )
 
 
@@ -176,22 +202,37 @@ def _globstar_to_re(pattern: str) -> str:
 #: Root-level directories never descended during the walk (capture side).
 PRUNE_ROOT_DIRS = frozenset({
     "hermes-agent", "bin", "node", "git", "lib", "lsp", "gateway-service", "packages",
-    "agent-browser", "lazy-packages", ".worktrees", "logs", "cache", "image_cache",
+    "agent-browser", "lazy-packages", ".worktrees", "logs", "image_cache",
     "audio_cache", "document_cache", "video_cache", "images", "browser_screenshots",
     "browser_recordings", "chrome-debug", "sandboxes", "pastes", "disk-cleanup", "tmp",
     "state-snapshots", "mcp-installs", "runtime", "pending_messages", "moa-traces",
     "spawn-trees", "proxy", "telemetry", "backups", "checkpoints", ".talaria", "photon",
+    # Hermes 0.21+: machine-local runtime roots (home_data_layout.PM_RUNTIME_ROOT_DIRS /
+    # LOCAL_RUNTIME_ROOT_DIRS) and the live CDP profile. Never descend into them.
+    "installs", "tools", "models", "models_cache.json", "runtimes",
+    "browser-profile", "browser_profiles", "serve_restart_pending", "archive",
 })
 
 #: Directory names pruned at any depth (regeneratable dependency/cache trees).
 PRUNE_ANY_DIRS = frozenset({
     "__pycache__", ".git", "node_modules", ".venv", "venv", "site-packages",
     ".cache", ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    # Hermes 0.21+: plugin/tool trees carry their own venvs and node_modules (skill_utils
+    # EXCLUDED_SKILL_DIRS mirrors these so a scan stays linear instead of exploding).
+    ".locks", "models", "runtimes",
 })
 
 #: skills/-scoped prune suffixes.
 PRUNE_SKILLS_SUBPATHS = (".hub/index-cache", ".hub/quarantine", ".curator_backups",
                          ".restore-backups", "index-cache")
+
+#: ``cache/`` subtrees Hermes itself preserves because nothing can rebuild them — media the
+#: gateway delivered to or received from the user, and the grounded-citations evidence ledger
+#: (``hermes_cli/backup.py`` ``_KEPT_CACHE_SUBDIRS``). Everything else under ``cache/`` is
+#: regenerable and is pruned.
+KEPT_CACHE_SUBDIRS = frozenset({
+    "images", "audio", "videos", "documents", "screenshots", "citations", "generated",
+})
 
 
 def should_prune(rel_parts: Sequence[str]) -> bool:
@@ -210,6 +251,10 @@ def should_prune(rel_parts: Sequence[str]) -> bool:
             return False
         name = profile_local[-1]
     if depth == 1:
+        # ``cache/`` is not a blanket prune: Hermes keeps a few subtrees nothing can rebuild,
+        # so descend one level and let the depth-2 branch decide per entry.
+        if name == "cache":
+            return False
         return name in PRUNE_ROOT_DIRS
     if name in PRUNE_ANY_DIRS:
         return True
@@ -218,6 +263,13 @@ def should_prune(rel_parts: Sequence[str]) -> bool:
         for sub in PRUNE_SKILLS_SUBPATHS:
             if rel_posix == f"skills/{sub}" or rel_posix.endswith("/" + sub):
                 return True
+    # Hermes keeps the cache subtrees it cannot rebuild: media the gateway delivered to or
+    # received from the user, plus the grounded-citations evidence ledger
+    # (backup.py _KEPT_CACHE_SUBDIRS). Everything else under cache/ is regenerable.
+    if name == "cache" and depth == 1:
+        return False
+    if rel_parts[0] == "cache" and depth == 2:
+        return name not in KEPT_CACHE_SUBDIRS
     if name == "node_modules":
         return True
     return False
@@ -258,6 +310,15 @@ KIND_RULES: Tuple[KindRule, ...] = (
     KindRule("memory-provider-keys", "credentials",
              ("honcho.json", "mem0.json", "hindsight/config.json", "byterover/**"),
              "a", "credential", "on", reason="memory-provider API keys (state §2.2)"),
+    # Hermes 0.21+ local credential vault (agent/vault_store.py). Key and ciphertext sit side
+    # by side, so the pair IS plaintext: it must travel through secrets handling, never as
+    # ordinary files. Upstream deliberately does NOT exclude it from backups, so dropping it
+    # would lose credentials the user believes are backed up.
+    KindRule("credential-vault", "credentials",
+             ("vault/vault.key", "vault/vault.json.enc", "vault/**"),
+             "a", "credential", "on", group_dir=1,
+             reason="local encrypted autofill vault; key + ciphertext together are the "
+                    "secret, so it moves only via vault/checklist mode (vault_store.py)"),
 
     # 9 platforms-messaging (pairing before generic; device-linked handled by exclusions)
     KindRule("pairing-stores", "platforms-messaging",
@@ -287,6 +348,31 @@ KIND_RULES: Tuple[KindRule, ...] = (
              reason="machine-specific keys rewritten; inline credential keys omitted (D29)"),
     KindRule("active-profile", "configuration", ("active_profile",), "a", "none", "on",
              root_only=True, reason="sticky profile selector; re-verified on target"),
+    KindRule("active-profile-legacy", "configuration", ("ACTIVE_PROFILE",), "c", "none",
+             "never", machine_bound=True,
+             reason="pre-0.20 uppercase selector that current Hermes no longer reads; "
+                    "shipping it would point the new machine at a stale profile"),
+    # Hermes 0.21+ per-profile / per-install state directories that DO hold user content.
+    KindRule("state-dir", "configuration", ("state/**",), "a", "none", "on",
+             reason="durable per-install counters, watches and heartbeats; small and "
+                    "user-visible (gateway heartbeat is the proof-of-life signal)"),
+    KindRule("briefings-dir", "conversations-history", ("briefings/**",), "a", "content", "off",
+             reason="archived run output kept by older versions; historical, not live state"),
+    KindRule("pets-dir", "identity-memory", ("pets/**",), "a", "none", "on",
+             reason="installed petdex pets the user picked (selected pet is in config)"),
+    KindRule("attachments-dir", "conversations-history", ("attachments/**",), "a", "content", "on",
+             reason="files users sent to and received from the agent; nothing can rebuild them"),
+    KindRule("pending-dir", "configuration", ("pending/**",), "a", "content", "on",
+             reason="work queued but not yet applied (e.g. pending memory); losing it drops "
+                    "an approved write"),
+    KindRule("terminal-sessions", "configuration", ("terminal-sessions/**",), "a", "none", "off",
+             reason="saved terminal backscroll; convenience rather than state"),
+    KindRule("connectors-dir", "configuration", ("connectors/**",), "b", "credential", "on",
+             reason="hosted-app connector identities (0.22+); tokens per named account"),
+    KindRule("plugin-update-checks", "configuration", ("plugin-update-checks/**",), "c", "none",
+             "never", machine_bound=True, reason="update-check timestamps; regenerates"),
+    KindRule("specs-output", "configuration", ("specs/**", "plans/**", "output/**"),
+             "a", "none", "off", reason="agent-authored planning/spec/report scratch dirs"),
     KindRule("mcp-json", "configuration", ("mcp.json",), "b", "none", "on",
              reason="per-profile MCP config; entries re-validated before write (D19)"),
     KindRule("skill-bundles", "configuration", ("skill-bundles/**",), "a", "none", "on",
@@ -361,9 +447,43 @@ KIND_RULES: Tuple[KindRule, ...] = (
              "c", "none", "never", machine_bound=True,
              reason="desktop install identity; regenerated per machine"),
 
+    # ``cache/`` — Hermes keeps the media/citation subtrees (see KEPT_CACHE_SUBDIRS); every
+    # other entry under it is regenerable. Loose files are caches too.
+    KindRule("cache-kept", "conversations-history",
+             ("cache/images/**", "cache/audio/**", "cache/videos/**", "cache/documents/**",
+              "cache/screenshots/**", "cache/citations/**", "cache/generated/**"),
+             "a", "content", "on", group_dir=2,
+             reason="media the gateway delivered to or received from the user and the "
+                    "grounded-citations ledger; upstream keeps these in a backup"),
+    KindRule("cache-regenerable", "runtime-ephemera",
+             ("cache/*", "cache/*/**"), "c", "none", "never", machine_bound=True,
+             reason="catalogs, probes and tool-output spill; regenerated on use"),
+
     # catch remaining known-noise
     KindRule("context-cache", "configuration", ("context_length_cache.yaml",), "c", "none",
              "never", machine_bound=True, reason="regeneratable model-context cache"),
+
+    # --- dirs that live under HERMES_HOME but are NOT Hermes core ---------------------
+    # The standalone web UI keeps its own app data here (sessions, attachments, the login
+    # key). Hermes core never reads this path (no reference in hermes_cli/ or agent/), so
+    # it is app data, not state: it travels, but never as a plaintext credential.
+    KindRule("webui-app", "webui", ("webui/**",), "b", "content", "on", group_dir=2,
+             reason="web UI app data: sessions, attachments, model cache"),
+    # Tooling that watches Hermes rather than being part of it. lcm-monitor keeps its own
+    # snapshots (GBs of them); the guard ledger is diagnostics.
+    KindRule("sidecar-tooling", "runtime-ephemera", ("lcm-monitor/**",), "c", "none",
+             "never", machine_bound=True,
+             reason="external monitor snapshots and logs; rebuilt on the new machine"),
+    KindRule("scratch-space", "runtime-ephemera", ("scratch/**",), "c", "none", "never",
+             machine_bound=True, reason="throwaway scratch working dir"),
+    # Pre-cutover database copies. This is exactly the kind of thing a migration must not
+    # drag along: they are large, stale, and a restore that lands them can confuse Hermes
+    # about which database is current.
+    KindRule("db-graveyard", "runtime-ephemera",
+             ("state.db.bak-*", "state.db.broken-*", "state.db.original-*",
+              "state.db.corrupt-*", "state.db.recovered-*", "state.db.retired-*",
+              "hermes_state.db.bak-*"), "c", "content", "never", machine_bound=True,
+             group_dir=1, reason="stale pre-cutover database copies"),
 )
 
 UNRECOGNIZED_KIND = "unrecognized"

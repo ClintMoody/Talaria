@@ -63,8 +63,38 @@ def resolve_root_and_profile(home: Path) -> Tuple[Path, Optional[str]]:
     return home, None
 
 
+#: Upstream ``hermes_constants.PROFILE_ID_RE`` — the canonical named-profile id grammar.
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+#: Upstream ``hermes_constants._PROFILE_IDENTITY_MARKERS``: a dir under profiles/ is a profile
+#: only when one of these exists. Runtime side-effects (cron heartbeats, log rotation, caches)
+#: and pre-tombstone ghost shells leave marker-less dirs that upstream refuses to list/serve.
+_PROFILE_IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json",
+                             "state.db")
+
+#: Upstream tombstone dir: a deleted named profile leaves ``profiles/.deleted/<name>``.
+_DELETED_PROFILES_DIR = ".deleted"
+
+
+def _named_profile_is_deleted(profile_home: Path) -> bool:
+    """Upstream ``named_profile_is_deleted`` — tombstoned profiles are not live."""
+    return (Path(profile_home).parent / _DELETED_PROFILES_DIR / Path(profile_home).name).exists()
+
+
+def _named_profile_has_identity(profile_home: Path) -> bool:
+    """Upstream ``named_profile_has_identity``; a dangling symlinked marker still counts."""
+    home = Path(profile_home)
+    return any((home / m).is_file() or (home / m).is_symlink() for m in _PROFILE_IDENTITY_MARKERS)
+
+
 def profile_homes(root: Path) -> Dict[str, Path]:
     """All state homes: {"": root, "<name>": root/profiles/<name>} (R-SCAN-02).
+
+    Membership mirrors upstream ``profiles.list_profiles`` -> ``_iter_named_profile_dirs``:
+    a directory counts only when its name matches ``PROFILE_ID_RE``, it carries an identity
+    marker, and it is not tombstoned. Upstream is explicit that marker-less dirs left behind
+    by runtime side-effects must never be listed or seeded (they became "real" profiles on
+    the next ``hermes update``); packing one here would migrate a phantom profile.
 
     Symlinked profile directories are skipped — following them would pack whatever the
     link points at (outside HERMES_HOME), violating the never-follow-symlinks rule
@@ -76,9 +106,13 @@ def profile_homes(root: Path) -> Dict[str, Path]:
         for child in sorted(profiles_dir.iterdir()):
             if child.name.startswith("."):
                 continue
+            if child.name == "default":
+                continue  # upstream: the default profile is the root home, never a named dir
             if child.is_symlink():
                 continue  # never follow — would pack the link's target (R-SCAN-05)
-            if child.is_dir():
+            if child.is_dir() and _PROFILE_ID_RE.match(child.name) \
+                    and _named_profile_has_identity(child) \
+                    and not _named_profile_is_deleted(child):
                 homes[child.name] = child
     return homes
 
@@ -130,6 +164,12 @@ class InstallIdentity:
 
 _VERSION_RE = re.compile(r'__version__\s*=\s*"([^"]+)"')
 _RELDATE_RE = re.compile(r'__release_date__\s*=\s*"([^"]+)"')
+#: ``__version__: str`` is an annotation, not a value — Hermes 0.21+ serves the real
+#: version lazily from ``__getattr__``. The value-based regex above simply skips it.
+_ANNOTATION_ONLY_RE = re.compile(r'^__version__\s*:\s*[^=]+\s*$', re.M)
+#: ``install-stamp.json`` (written by ``scripts/write_install_stamp.py``) is authoritative
+#: for packaged builds and for every source install since the unified package manager.
+_STAMP_NAME = "install-stamp.json"
 
 
 def find_install_dir(root: Path, env: Optional[Dict[str, str]] = None) -> Optional[Path]:
@@ -194,14 +234,21 @@ def detect_identity(home: Path, env: Optional[Dict[str, str]] = None,
                  else "macos" if sys.platform == "darwin" else "linux"),
         layout_family="windows" if sys.platform == "win32" else "posix",
     )
-    active_file = root / "active_profile"
-    if ident.active_profile is None and active_file.is_file():
-        try:
-            name = active_file.read_text(encoding="utf-8").strip()
-            if name and name != "default":
-                ident.active_profile = name
-        except OSError:
-            pass
+    # Upstream ``profiles.get_active_profile``: the sticky file is ``<root>/active_profile``,
+    # read as ``utf-8-sig`` (Windows editors leave a BOM), and a missing OR empty file means
+    # ``"default"`` — ``set_active_profile("default")`` deletes the file, so absence is the
+    # normal encoding of "default", never "unknown". The uppercase ``ACTIVE_PROFILE`` that
+    # older installs left behind has zero readers upstream and is NOT consulted here.
+    if ident.active_profile is None:
+        ident.active_profile = "default"
+        active_file = root / "active_profile"
+        if active_file.is_file():
+            try:
+                name = active_file.read_text(encoding="utf-8-sig").strip()
+                if name:
+                    ident.active_profile = name
+            except (OSError, UnicodeDecodeError):
+                ident.notes.append("active_profile unreadable; assuming 'default'")
 
     install_dir = find_install_dir(root, env)
     if install_dir is None:
@@ -209,22 +256,30 @@ def detect_identity(home: Path, env: Optional[Dict[str, str]] = None,
     else:
         ident.install_dir = str(install_dir)
         ident.install_method = detect_install_method(install_dir)
-        init_py = install_dir / "hermes_cli" / "__init__.py"
-        try:
-            text = init_py.read_text(encoding="utf-8")
-            m = _VERSION_RE.search(text)
-            if m:
-                ident.hermes_version = m.group(1)
-            m = _RELDATE_RE.search(text)
-            if m:
-                ident.release_date = m.group(1)
-        except OSError:
-            pass
+        if ident.hermes_version is None:
+            init_py = install_dir / "hermes_cli" / "__init__.py"
+            try:
+                text = init_py.read_text(encoding="utf-8")
+                m = _VERSION_RE.search(text)
+                if m:
+                    ident.hermes_version = m.group(1)
+                m = _RELDATE_RE.search(text)
+                if m:
+                    ident.release_date = m.group(1)
+                if ident.hermes_version is None and _ANNOTATION_ONLY_RE.search(text):
+                    # Modern Hermes: the literal is served by __getattr__ and cannot be read
+                    # statically. Say so instead of leaking a sentinel into the bundle.
+                    ident.notes.append(
+                        "version served lazily (__getattr__); falling back to "
+                        "install-stamp.json / git")
+            except OSError:
+                pass
         if ident.hermes_version is None:
             try:
                 pyproject = (install_dir / "pyproject.toml").read_text(encoding="utf-8")
                 m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
-                if m:
+                # ``0.0.0`` is the versionless placeholder upstream ships; never report it.
+                if m and m.group(1) not in ("0.0.0", ""):
                     ident.hermes_version = m.group(1)
             except OSError:
                 pass
@@ -244,6 +299,9 @@ def detect_identity(home: Path, env: Optional[Dict[str, str]] = None,
                 ident.git_dirty = any(not l.startswith("??") for l in porcelain.splitlines())
                 ident.git_untracked = [l[3:] for l in porcelain.splitlines()
                                        if l.startswith("?? ")]
+        # The install stamp is authoritative (it is what version_info itself reads), so it
+        # runs last and overrides anything inferred from source text or git.
+        _read_install_stamp(install_dir, ident)
         if run_venv_probe:
             ident.lazy_features = _probe_lazy_features(install_dir)
             if ident.lazy_features is None:
@@ -254,6 +312,29 @@ def detect_identity(home: Path, env: Optional[Dict[str, str]] = None,
         ident.config_version = _read_config_version(config)
     ident.python = f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}"
     return ident
+
+
+def _read_install_stamp(install_dir: Path, ident: "InstallIdentity") -> None:
+    """Fill identity from ``install-stamp.json`` (Hermes 0.21+, unified package manager).
+
+    The stamp is the same document ``hermes_cli.version_info`` reads, and it is what every
+    packager (Docker, Nix, desktop app) writes at build time. It is the only static source of
+    truth once ``hermes_cli/__init__.py`` moved ``__version__`` behind ``__getattr__``.
+    """
+    try:
+        raw = (Path(install_dir) / _STAMP_NAME).read_text(encoding="utf-8-sig")
+        stamp = json.loads(raw)
+    except (OSError, ValueError):
+        return
+    if not isinstance(stamp, dict):
+        return
+    base = str(stamp.get("baseVersion") or "").strip()
+    display = str(stamp.get("displayVersion") or "").strip()
+    if base and base != "0.0.0":
+        ident.hermes_version = base
+    elif display:
+        # A tagless stamp carries the derived identity only; keep it rather than nothing.
+        ident.hermes_version = display
 
 
 def _read_config_version(config_path: Path) -> Optional[int]:

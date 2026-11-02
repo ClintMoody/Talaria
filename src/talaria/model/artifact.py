@@ -35,6 +35,7 @@ class FileEntry:
     mtime: float
     sha256: Optional[str] = None  # filled during pack (scan is metadata-only, R-SCAN-06)
     is_symlink: bool = False      # recorded, never followed (R-SCAN-05)
+    link_target: Optional[str] = None  # what the symlink points at, verbatim (is_symlink only)
     is_sqlite: bool = False       # captured via snapshot protocol when True
 
     def to_json(self) -> dict:
@@ -44,6 +45,8 @@ class FileEntry:
             record["sha256"] = self.sha256
         if self.is_symlink:
             record["is_symlink"] = True
+            if self.link_target is not None:
+                record["link_target"] = self.link_target
         if self.is_sqlite:
             record["is_sqlite"] = True
         return record

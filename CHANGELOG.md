@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.1.0 — 2026-11-01
+
+Brought Talaria's model of Hermes up from 0.20.1 to **0.22.5** (released 2026-10-23),
+verifying each assumption against the real v0.22.5 tree rather than the release notes.
+Bundle schema stays 1 and older readers still read new bundles (every addition is an
+additive manifest key). Two changes are behaviour-visible: symlinked skills now travel,
+and artifact ids for skills are now unique.
+
+- **Version detection rewritten** for Hermes 0.21+. Hermes moved the version out of
+  `hermes_cli/__init__.py` (it is now an annotation served by module `__getattr__`),
+  `pyproject.toml` carries the `0.0.0` placeholder, and `install-stamp.json` is the
+  authoritative record. Every modern install used to report **0.0.0**. Identity now
+  follows upstream's own resolution order (install stamp, then live git, then unknown)
+  and never reports the placeholder.
+- **Named-profile discovery matches `profiles.list_profiles`.** A directory counts only
+  when its name matches `PROFILE_ID_RE`, it carries an identity marker
+  (`config.yaml`/`.env`/`SOUL.md`/`profile.yaml`/`auth.json`/`state.db`), and it is not
+  tombstoned under `profiles/.deleted/`. Runtime side-effect dirs and pre-tombstone ghost
+  shells are no longer packed as phantom profiles, and `profiles/default` is not counted
+  twice.
+- **Active profile follows upstream.** The sticky file is `<root>/active_profile`, read
+  as `utf-8-sig`; a missing file means `default` (`set_active_profile("default")`
+  deletes it). The legacy uppercase `ACTIVE_PROFILE` has no readers upstream and is no
+  longer consulted. Absence used to report `None`.
+- **Version comparison fixed.** `0.22.4+7.gabc` parsed as `(0, 22, 47)` and read as NEWER
+  than `0.22.5`; a `v2026.8.13` release date parsed as `(2026, 8, 13)` and outranked every
+  `0.x` release. Such a false "newer" turns into a bogus FORWARD-OK, and a false "older"
+  refuses a legitimate apply as a downgrade.
+- **Symlinked skills now travel.** An out-of-tree skill is installed as a symlink and
+  Hermes' own `profile export` preserves it (`copytree(symlinks=True)`); Talaria recorded
+  the link but wrote no payload member, so every linked skill vanished (42 on a real
+  install). Links now travel in the manifest's additive `symlinks[]` section and are
+  recreated on apply, verified by target, and restored by rollback — including dangling
+  links and pre-existing links being replaced.
+- **Artifact ids are unique.** Skills were grouped by path depth, so every skill sitting
+  directly at `skills/<name>/` collapsed onto `skill-dir@/SKILL.md` (57 collisions on a
+  real install) and category-level files each became their own artifact. Grouping now
+  follows the skill directory that owns the file, which also restores provenance tagging
+  for 113 previously-untagged skills.
+- **Catalog catch-up for the Hermes directory model.** `installs/`, `tools/`,
+  `browser-profile/`, retired WAL captures and update/restart markers are now excluded or
+  pruned as runtime state; `cache/` is descended instead of dropped wholesale so the
+  subtrees Hermes keeps (`images`, `audio`, `videos`, `documents`, `screenshots`,
+  `citations`, `generated`) are carried; the credential vault is classified as a
+  credential (key and ciphertext side by side are plaintext) rather than `secrecy=none`;
+  and `state/`, `briefings/`, `pets/`, `attachments/`, `pending/`, `specs/`, `plans/`,
+  `output/` and the active-profile files are classified instead of being unrecognized.
+  Unrecognized files on a real install dropped from 23,177 to 4,467.
+- **Non-core directories under `HERMES_HOME` are accounted for.** The standalone web UI
+  keeps 3.1 GB of app data in `webui/` (sessions, attachments, model cache); Hermes core
+  never reads that path, so it had been scanned as unrecognized and travelled as
+  record-only: silently dropped from every bundle. It is now carried as app data. Sidecar
+  tooling that watches Hermes rather than being part of it (`lcm-monitor/`, `scratch/`)
+  and stale pre-cutover database copies (`state.db.bak-*`, `.broken-*`, `.corrupt-*`,
+  `.recovered-*`) are classified and left behind on purpose: they are large, and a
+  restore that lands an old database copy can leave Hermes unsure which one is current.
+  Unrecognized on a real install dropped from 12.3 GB to 142 MB.
+- **Out-of-tree symlinks are reported as dependencies.** Of 50 symlinks on a real
+  install, 48 point outside `HERMES_HOME` (to skill repos under `PROJECTS/`, `.agents/`,
+  plugin checkouts). The bundle carries the link record but by design cannot carry the
+  target, so 37 of 42 linked skills landed dangling on a fresh-machine apply and would
+  never load. `talaria deps` now lists each one with its target and remediation, and the
+  per-OS verdict is `action`, never `ok`. Hermes' own `profile export` has the same hole;
+  the difference is that Talaria tells you.
+- `talaria diff` defaults to `skills`; bare invocation used to exit with a dead-end
+  "the following arguments are required: what".
+- Docs updated for the new layout; research notes keep the version they were written
+  against.
+
 ## 1.0.0 — 2026-08-15
 
 First release. Talaria moves a Hermes Agent installation between machines — any

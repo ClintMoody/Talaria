@@ -31,8 +31,34 @@ class TestHomes:
 
     def test_profile_homes(self, tmp_path):
         (tmp_path / "profiles" / "coder").mkdir(parents=True)
+        (tmp_path / "profiles" / "coder" / "config.yaml").write_text("_config_version: 50\n")
         homes = resolve.profile_homes(tmp_path)
         assert set(homes) == {"", "coder"}
+
+    def test_profile_homes_skips_markerless_dirs(self, tmp_path):
+        # Upstream refuses to list a marker-less dir: runtime side-effects (cron heartbeats,
+        # log rotation, caches) leave these behind, and seeding one made a phantom profile.
+        (tmp_path / "profiles" / "ghost").mkdir(parents=True)
+        (tmp_path / "profiles" / "real").mkdir(parents=True)
+        (tmp_path / "profiles" / "real" / "SOUL.md").write_text("# soul\n")
+        assert set(resolve.profile_homes(tmp_path)) == {"", "real"}
+
+    def test_profile_homes_skips_tombstoned_and_bad_ids(self, tmp_path):
+        root = tmp_path / "profiles"
+        for name in ("gone", "BadCase", "ok"):
+            (root / name).mkdir(parents=True)
+            (root / name / "config.yaml").write_text("_config_version: 50\n")
+        (root / ".deleted").mkdir()
+        (root / ".deleted" / "gone").mkdir()
+        assert set(resolve.profile_homes(tmp_path)) == {"", "ok"}
+
+    def test_profile_homes_skips_default_dir(self, tmp_path):
+        # Upstream: the default profile IS the root home, so a profiles/default dir is not a
+        # second profile.
+        d = tmp_path / "profiles" / "default"
+        d.mkdir(parents=True)
+        (d / "config.yaml").write_text("_config_version: 50\n")
+        assert set(resolve.profile_homes(tmp_path)) == {""}
 
     def test_looks_like_hermes_home(self, tmp_path):
         assert not resolve.looks_like_hermes_home(tmp_path)
@@ -62,6 +88,53 @@ class TestIdentity:
                                                                   with_dirty_checkout=True))
         ident = resolve.detect_identity(inst.home, run_venv_probe=False)
         assert ident.git_dirty
+
+    def test_modern_layout_reads_install_stamp(self, tmp_path):
+        # Hermes 0.21+: __version__ is annotation-only (served by __getattr__) and pyproject
+        # carries the 0.0.0 placeholder, so install-stamp.json is the only static truth.
+        inst = build_fake_install(tmp_path / "h", FakeInstallSpec(
+            modern_layout=True, version="0.21.5", release_date="2026.9.24"))
+        ident = resolve.detect_identity(inst.home, run_venv_probe=False)
+        assert ident.hermes_version == "0.21.5"
+        assert ident.release_date == "2026.9.24"
+        assert ident.install_method == "git"
+        assert any("lazily" in n for n in ident.notes), ident.notes
+
+    def test_modern_layout_stamp_beats_placeholder(self, tmp_path):
+        inst = build_fake_install(tmp_path / "h", FakeInstallSpec(
+            modern_layout=True, version="0.21.5",
+            stamp_display_version="0.22.3+120.gabc.dirty"))
+        ident = resolve.detect_identity(inst.home, run_venv_probe=False)
+        assert ident.hermes_version == "0.21.5", "baseVersion wins over displayVersion"
+        assert ident.hermes_version != "0.0.0"
+
+    def test_stamp_only_fallback_when_no_base(self, tmp_path):
+        # A stamp with no usable baseVersion must fall back to displayVersion, never 0.0.0.
+        inst = build_fake_install(tmp_path / "h", FakeInstallSpec(
+            modern_layout=True, version="0.21.5", stamp_base_version="0.0.0",
+            stamp_display_version="0.22.4+7.gabc"))
+        ident = resolve.detect_identity(inst.home, run_venv_probe=False)
+        assert ident.hermes_version == "0.22.4+7.gabc"
+
+    def test_corrupt_stamp_degrades(self, tmp_path):
+        inst = build_fake_install(tmp_path / "h", FakeInstallSpec(modern_layout=True))
+        (inst.code_dir / "install-stamp.json").write_text("{not json", encoding="utf-8")
+        ident = resolve.detect_identity(inst.home, run_venv_probe=False)
+        assert ident.hermes_version != "0.0.0"
+
+    def test_active_profile_defaults_to_default(self, tmp_path):
+        # Absence of <root>/active_profile MEANS "default" upstream (set_active_profile(
+        # "default") deletes the file); the legacy uppercase ACTIVE_PROFILE has no readers.
+        (tmp_path / "config.yaml").write_text("_config_version: 50\n")
+        (tmp_path / "ACTIVE_PROFILE").write_text("jarvis\n")
+        ident = resolve.detect_identity(tmp_path, run_venv_probe=False)
+        assert ident.active_profile == "default"
+
+    def test_active_profile_reads_sticky_file(self, tmp_path):
+        (tmp_path / "config.yaml").write_text("_config_version: 50\n")
+        (tmp_path / "active_profile").write_text("\ufeffcoder\n", encoding="utf-8")
+        ident = resolve.detect_identity(tmp_path, run_venv_probe=False)
+        assert ident.active_profile == "coder", "BOM must be stripped (utf-8-sig)"
 
     def test_no_checkout_degrades(self, tmp_path):
         (tmp_path / "config.yaml").write_text("_config_version: 36\n")

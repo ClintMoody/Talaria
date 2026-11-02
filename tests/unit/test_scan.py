@@ -55,7 +55,20 @@ class TestWalk:
         all_files = [f.home_rel for a in result.artifacts for f in a.files]
         assert not any(f.startswith("hermes-agent/") for f in all_files)
         assert not any(f.startswith("bin/") or f.startswith("node/") for f in all_files)
-        assert not any(f.startswith("logs/") or f.startswith("cache/") for f in all_files)
+        assert not any(f.startswith("logs/") for f in all_files)
+        # cache/ is descended now: kept subtrees are real content, everything else is
+        # captured-but-never-selected (regenerable), never a blanket drop.
+        for art in result.artifacts:
+            if not any(f.home_rel.startswith("cache/") for f in art.files):
+                continue
+            rel = art.files[0].home_rel
+            parts = rel.split("/")
+            if len(parts) >= 3 and parts[1] in {
+                    "images", "audio", "videos", "documents", "screenshots",
+                    "citations", "generated"}:
+                continue
+            assert art.kind == "cache-regenerable", rel
+            assert art.default == "never" and art.selected is False, rel
 
     def test_profile_subtree_scanned(self, installed):
         _inst, result = installed
@@ -72,6 +85,29 @@ class TestWalk:
         rels = {f.home_rel for f in web.files}
         assert "skills/research/web-search/SKILL.md" in rels
         assert "skills/research/web-search/references/engines.md" in rels
+
+    def test_artifact_ids_are_unique(self, installed):
+        # Two different skills used to share the id "skill-dir@/SKILL.md" whenever they sat
+        # directly under skills/ rather than skills/<category>/<name>/, so a report could not
+        # tell 57 skills apart and per-skill select/deselect was impossible.
+        _inst, result = installed
+        ids = [a.id for a in result.artifacts]
+        assert len(ids) == len(set(ids)), sorted(
+            i for i in set(ids) if ids.count(i) > 1)
+
+    def test_direct_child_skill_is_its_own_artifact(self, installed):
+        _inst, result = installed
+        skills = {a.id: a for a in result.by_kind("skill-dir")}
+        assert "skill-dir@/flat-skill" in skills, sorted(skills)
+        assert [f.home_rel for f in skills["skill-dir@/flat-skill"].files] == [
+            "skills/flat-skill/SKILL.md"]
+
+    def test_skill_provenance_reaches_direct_child_skills(self, installed):
+        # Provenance used to be looked up by path depth (skills/<cat>/<name>), so a skill at
+        # skills/<name>/ silently came back untagged.
+        _inst, result = installed
+        art = next(a for a in result.by_kind("skill-dir") if a.id == "skill-dir@/flat-skill")
+        assert art.provenance.get("skill"), art.provenance
 
     def test_state_db_flagged_sqlite(self, installed):
         _inst, result = installed
