@@ -94,6 +94,14 @@ class FakeInstallSpec:
     username: str = "alice"
     with_git: bool = False  # real git repo for the checkout (requires git binary)
     with_dirty_checkout: bool = False  # modify a repo file after commit (needs with_git)
+    #: Modern Hermes (0.21+): ``hermes_cli/__init__.py`` carries an ANNOTATION-ONLY
+    #: ``__version__`` served by module ``__getattr__``, so the version is only readable from
+    #: ``install-stamp.json``. The pyproject version is the ``0.0.0`` placeholder upstream ships.
+    modern_layout: bool = False
+    #: install-stamp.json baseVersion; falls back to ``version`` when unset.
+    stamp_base_version: str | None = None
+    #: install-stamp.json displayVersion; defaults to ``<base>+<n>.g<sha>.dirty``.
+    stamp_display_version: str | None = None
     with_profile: str | None = None  # name of one nested profile to create
     with_wal_sidecars: bool = True  # leave fake -wal/-shm files next to state.db
     with_machine_bound: bool = True
@@ -162,7 +170,9 @@ def _make_sqlite(path: Path, schema: str, rows: list[tuple[str, tuple]] | None =
 
 def _seed_skill(root: Path, category: str, dirname: str, name: str, description: str,
                 tags: str = "test", extra_files: dict[str, str] | None = None) -> Path:
-    skill_dir = root / category / dirname
+    # An empty category means the skill lives DIRECTLY under root (a real layout: many
+    # installs have skills/<name>/SKILL.md with no category level at all).
+    skill_dir = (root / dirname) if not category else (root / category / dirname)
     _write(skill_dir / "SKILL.md", STOCK_SKILL_BODY.format(
         name=name, description=description, tags=tags, title=name.replace("-", " ").title()))
     for rel, content in (extra_files or {}).items():
@@ -355,6 +365,12 @@ def _build_skills(inst: FakeHermesInstall) -> None:
            AGENT_SKILL_BODY.format(name="old-notes-skill", topic="note keeping"))
     _write(root / ".curator_suppressed", "unused-builtin-skill\n")
 
+    # 7. A skill sitting DIRECTLY under skills/ (no category dir). Real installs are full of
+    # these — Clint's own ~/.hermes/skills has 40+ — and depth-based grouping used to collapse
+    # every one of them onto the filename id "skill-dir@/SKILL.md".
+    _seed_skill(root, "", "flat-skill", "flat-skill",
+                "A skill with no category directory", tags="test")
+
     _write(root / ".bundled_manifest", "\n".join(manifest_lines) + "\n")
     _write(root / ".usage.json", json.dumps({
         "web-search": {"created_by": None, "use_count": 42, "state": "active"},
@@ -525,10 +541,39 @@ def _build_integrations(inst: FakeHermesInstall) -> None:
 def _build_code_checkout(inst: FakeHermesInstall) -> None:
     s = inst.spec
     code = inst.code_dir
-    _write(code / "pyproject.toml",
-           f'[project]\nname = "hermes-agent"\nversion = "{s.version}"\n')
-    _write(code / "hermes_cli" / "__init__.py",
-           f'__version__ = "{s.version}"\n__release_date__ = "{s.release_date}"\n')
+    if s.modern_layout:
+        # Upstream ships the versionless placeholder and serves the real version lazily.
+        _write(code / "pyproject.toml",
+               '[project]\nname = "hermes-agent"\nversion = "0.0.0"\n')
+        _write(code / "hermes_cli" / "__init__.py",
+               '_UNSET = object()\n'
+               '__version__: str\n'
+               f'__release_date__ = "{s.release_date}"\n'
+               '\n\ndef __getattr__(name):\n'
+               '    if name == "__version__":\n'
+               '        return "0.0.0"\n'
+               '    raise AttributeError(name)\n')
+        base = s.stamp_base_version or s.version
+        display = s.stamp_display_version or f"{base}+8493.gdeadbee.dirty"
+        _write(code / "install-stamp.json", json.dumps({
+            "schemaVersion": 2,
+            "baseVersion": base,
+            "displayVersion": display,
+            "distance": 8493,
+            "commit": "deadbeef" * 5,
+            "branch": "main",
+            "dirty": True,
+            "source": "git",
+            "distribution": None,
+            "updateMechanism": "self",
+            "builtAt": "2026-10-26T00:00:56.330305+00:00",
+            "tag": None,
+        }, indent=2))
+    else:
+        _write(code / "pyproject.toml",
+               f'[project]\nname = "hermes-agent"\nversion = "{s.version}"\n')
+        _write(code / "hermes_cli" / "__init__.py",
+               f'__version__ = "{s.version}"\n__release_date__ = "{s.release_date}"\n')
     _write(code / "hermes", "#!/usr/bin/env python3\n# launcher\n")
     # A venv marker tree (never migrated).
     _write(code / "venv" / "pyvenv.cfg", "home = /usr\nversion = 3.11.9\n")

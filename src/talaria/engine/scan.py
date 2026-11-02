@@ -113,6 +113,16 @@ def _walk_profile(root: Path, phome: Path, profile: str,
                   on_item: Optional[Callable[[str], None]],
                   skip_profiles_subtree: bool = False) -> None:
     prefix_parts: Tuple[str, ...] = ()
+    # Skills are grouped by the directory that owns them, which only a skills-tree walk can
+    # know (skills are not reliably at skills/<cat>/<name>/). Computed once per profile home.
+    skill_index: Optional[Dict[str, str]] = None
+    skills_dir = Path(phome) / "skills"
+    if skills_dir.is_dir() and not (Path(phome) / "skills").is_symlink():
+        try:
+            from talaria.engine.provenance import skill_dir_index
+            skill_index = skill_dir_index(skills_dir)
+        except (OSError, RuntimeError, ValueError):
+            skill_index = None
 
     def visit_dir(dir_path: Path, rel_parts: Tuple[str, ...]) -> None:
         try:
@@ -129,7 +139,7 @@ def _walk_profile(root: Path, phome: Path, profile: str,
                 is_symlink = entry.is_symlink()
                 if is_symlink:
                     _record_file(entry, child_parts, profile, groups, result,
-                                 symlink=True)
+                                 symlink=True, skill_index=skill_index)
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     if should_prune(child_parts):
@@ -138,7 +148,8 @@ def _walk_profile(root: Path, phome: Path, profile: str,
                         continue
                     visit_dir(Path(entry.path), child_parts)
                 elif entry.is_file(follow_symlinks=False):
-                    _record_file(entry, child_parts, profile, groups, result)
+                    _record_file(entry, child_parts, profile, groups, result,
+                                 skill_index=skill_index)
                     if on_item is not None and result.scanned_files % 500 == 0:
                         on_item("/".join(child_parts))
             except OSError as exc:
@@ -147,9 +158,30 @@ def _walk_profile(root: Path, phome: Path, profile: str,
     visit_dir(phome, prefix_parts)
 
 
+def _discriminator(kind: str, group_key: str) -> str:
+    """The unique part of an artifact id, given the artifact's group key.
+
+    For a skill the group key is the owning skill directory, so the discriminator is that
+    directory relative to ``skills/`` (``alfred/calendly``) — unique per skill, and stable
+    when the same skill is packed from a different machine. For every other kind the group
+    key is a path prefix, and only a loose file uses the file path as the key; those must
+    keep their full path or ``skills/a/DESCRIPTION.md`` and ``skills/b/DESCRIPTION.md``
+    collapse onto the single id ``skill-dir@/DESCRIPTION.md``.
+    """
+    if not group_key:
+        return ""
+    if kind == "skill-dir":
+        return group_key[len("skills/"):] if group_key.startswith("skills/") else group_key
+    tail = group_key.rsplit("/", 1)[-1]
+    # A path prefix (``skills/alfred``, ``plugins/p``) yields a readable tail; a loose file
+    # path keeps its full form because the tail is exactly what collides.
+    return tail
+
+
 def _record_file(entry, rel_parts: Tuple[str, ...], profile: str,
                  groups: Dict[Tuple[str, str, str], Artifact], result: ScanResult,
-                 symlink: bool = False) -> None:
+                 symlink: bool = False,
+                 skill_index: Optional[Dict[str, str]] = None) -> None:
     rel_posix = "/".join(rel_parts)
     cls = classify(rel_posix, profile)
     if cls.excluded is not None:
@@ -178,10 +210,21 @@ def _record_file(entry, rel_parts: Tuple[str, ...], profile: str,
     if not symlink and (rel_posix.endswith(".db") or rel_posix.endswith(".sqlite")):
         fe.is_sqlite = is_sqlite_file(Path(entry.path))
 
-    akey = (profile, cls.kind, cls.group_key)
+    group_key = cls.group_key
+    if skill_index is not None and cls.kind == "skill-dir":
+        # A skill artefact is the skill DIRECTORY that owns this file (the dir holding
+        # SKILL.md), not a fixed path prefix: skills are not always at skills/<cat>/<name>/.
+        # The index is keyed skills-root-relative, so strip the leading "skills/".
+        rel_key = rel_posix[len("skills/"):] if rel_posix.startswith("skills/") else rel_posix
+        owner = skill_index.get(rel_key)
+        # Outside any skill, keep the file itself as the discriminator so loose files stay
+        # one artefact each rather than colliding on a shared id.
+        group_key = f"skills/{owner}" if owner else rel_posix
+
+    akey = (profile, cls.kind, group_key)
     art = groups.get(akey)
     if art is None:
-        discriminator = cls.group_key.rsplit("/", 1)[-1] if cls.group_key else ""
+        discriminator = _discriminator(cls.kind, group_key)
         art = Artifact(
             id=artifact_id(cls.kind, profile, discriminator), kind=cls.kind,
             family=cls.family, profile=profile, portability=cls.portability,
@@ -215,18 +258,18 @@ def _attach_skill_provenance(root: Path, result: ScanResult) -> None:
         for art in result.artifacts:
             if art.kind != "skill-dir" or art.profile != profile:
                 continue
-            # art group files share the prefix skills/<cat>/<skill>; recover the
-            # skills-root-relative directory to match the provenance key.
-            if not art.files:
+            # The artifact id already carries the owning skill directory relative to skills/
+            # (see _discriminator), which is exactly the provenance key. Reading it off
+            # file paths instead assumed skills/<cat>/<name>/ and silently dropped every
+            # skill that lives directly at skills/<name>/.
+            if not art.id.startswith("skill-dir@/"):
                 continue
-            parts = art.files[0].home_rel.split("/")
-            if len(parts) >= 3 and parts[0] == "skills":
-                rel = "/".join(parts[1:3])
-                prov = provenances.get(rel)
-                if prov is not None:
-                    art.provenance["skill"] = prov.tag
-                    if prov.usage.get("created_by"):
-                        art.provenance["created_by"] = prov.usage["created_by"]
+            rel = art.id[len("skill-dir@/"):]
+            prov = provenances.get(rel)
+            if prov is not None:
+                art.provenance["skill"] = prov.tag
+                if prov.usage.get("created_by"):
+                    art.provenance["created_by"] = prov.usage["created_by"]
 
 
 def _live_install_etiquette(root: Path, result: ScanResult) -> None:

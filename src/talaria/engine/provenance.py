@@ -180,6 +180,34 @@ def iter_skill_dirs(skills_dir: Path) -> List[Path]:
     return found
 
 
+def skill_dir_index(skills_dir: Path) -> Dict[str, str]:
+    """Map every path under ``skills_dir`` to the skill directory that owns it (or ``""``).
+
+    A skill is the directory holding ``SKILL.md`` (upstream ``iter_skill_dirs``); everything
+    under it, including nested ``references/``/``scripts/`` files and nested SKILL.md files
+    inside support dirs, belongs to that skill. Loose files that sit outside any skill
+    (``skills/.curator_ledger.jsonl``, a category-level ``DESCRIPTION.md``) map to ``""``.
+
+    Grouping by path depth instead (the old ``group_dir=3``) is wrong both ways: skills that
+    live DIRECTLY under ``skills/<name>/`` collapsed onto their filename, so dozens of
+    different skills all became ``skill-dir@/SKILL.md``, while category-level files became
+    artifacts of their own. Ownership by SKILL.md is what the format actually defines.
+    """
+    skills_dir = Path(skills_dir)
+    owned: Dict[str, str] = {}
+    for skill_path in iter_skill_dirs(skills_dir):
+        rel = skill_path.relative_to(skills_dir).as_posix()
+        owned[rel] = rel
+        try:
+            children = sorted(skill_path.rglob("*"))
+        except OSError:
+            continue
+        for child in children:
+            if child.is_file() or child.is_symlink():
+                owned[child.relative_to(skills_dir).as_posix()] = rel
+    return owned
+
+
 # --------------------------------------------------------------------------- tagging
 
 @dataclass

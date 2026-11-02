@@ -45,8 +45,17 @@ class TestPruning:
         assert not should_prune(("skills", "autonomous-ai-agents", "hermes-agent"))
 
     def test_vendored_roots(self):
-        for name in ("node", "bin", "logs", "cache", "mcp-installs", ".talaria"):
+        for name in ("node", "bin", "logs", "mcp-installs", ".talaria"):
             assert should_prune((name,)), name
+
+    def test_cache_descended_not_blanket_pruned(self):
+        # Hermes keeps cache subtrees nothing can rebuild (media, citations): the walk must
+        # descend cache/ and prune per-subdir rather than dropping the whole tree.
+        assert not should_prune(("cache",))
+        assert not should_prune(("cache", "images"))
+        assert not should_prune(("cache", "citations"))
+        assert should_prune(("cache", "exec"))
+        assert should_prune(("cache", "terminal"))
 
     def test_any_depth_regeneratables(self):
         assert should_prune(("plugins", "p", "node_modules"))
