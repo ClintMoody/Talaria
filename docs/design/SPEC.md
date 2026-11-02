@@ -11,8 +11,11 @@ proposals: `digest`, `state`, `skills`, `cron`, `integ`, `install`, `backup`, `c
 ## 1. Product identity
 
 - **Name:** **Talaria** (final; all four proposals and the committee converge). CLI command
-  `talaria`; bundle extension `.hermespack`; PyPI distribution `talaria-migration`, import
+  `talaria`; bundle extension `.hermespack`; distribution `talaria-hermes`, import
   package `talaria`.
+- **Name note (2026-11):** `talaria-hermes` is the real distribution name but is not yet on
+  PyPI; the planned `talaria-migration` name was never uploaded and `talaria` on PyPI is an
+  unrelated project. Install from source until publishing happens.
 - **Tagline (descriptor lock — the name never appears in an H1, masthead, or `--help` line 1
   without it):** *"Talaria — moves your Hermes agent to a new computer."*
 - **Non-affiliation line (README + About):** *"Community tool. Not affiliated with Nous Research."*

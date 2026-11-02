@@ -14,7 +14,7 @@ Playwright, vermin.
 ## 1. Package layout
 
 ```
-talaria/                      # import package; PyPI dist "talaria-migration"; console script "talaria"
+talaria/                      # import package; dist "talaria-hermes"; console script "talaria"
   __init__.py                 # __version__, BUNDLE_SCHEMA_VERSION=1, HERMES_KNOWLEDGE stamp
   __main__.py                 # 2.7-parseable floor stub (no f-strings) -> cli.main()   [R-XPLAT-09]
   cli.py                      # argparse tree, exit-code mapping (§14), --json plumbing

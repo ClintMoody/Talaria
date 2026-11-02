@@ -61,7 +61,9 @@ Checksum or structure failure. `talaria inspect <bundle> --salvage` lists exactl
 members still verify and `--extract` recovers them. Re-transfer the file if you can.
 
 ### TAL-302 — Bundle schema newer than this tool {#tal-302}
-The bundle was made by a newer Talaria. Upgrade here: `pipx upgrade talaria-migration`.
+The bundle was made by a newer Talaria. Upgrade here:
+`pipx upgrade talaria-hermes`, or reinstall from source:
+`pipx install --force "git+https://github.com/ClintMoody/Talaria"`.
 (Older bundles always open in newer tools — read-forever policy.)
 
 ### TAL-303 — Hostile bundle refused {#tal-303}

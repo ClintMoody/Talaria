@@ -6,8 +6,10 @@ both sides of a move, then the power surface.
 ## Before you start
 
 - Works on Linux, macOS, native Windows, WSL, and Termux, in any direction.
-- The tool must be installed on **both** machines (`pipx install talaria-migration`, or
-  carry the single-file `talaria.pyz`).
+- The tool must be installed on **both** machines (`pipx install
+  "git+https://github.com/ClintMoody/Talaria"`, or carry the single-file `talaria.pyz`,
+  which needs no install at all). `talaria-hermes` is not on PyPI yet, and the `talaria`
+  name there belongs to an unrelated project.
 - You do NOT need Hermes installed on the new machine first — Talaria places the state
   and Hermes adopts it when installed. Installing Hermes first is also fine.
 - Migration is calmest with the gateway stopped (`hermes gateway stop`), but a live
