@@ -60,12 +60,14 @@
 ## Quick start
 
 ```bash
-pipx install talaria-migration          # or: pip install talaria-migration
+pipx install talaria-hermes              # or: pip install talaria-hermes
 talaria                                 # opens the wizard in your browser
 ```
 
 Zero dependencies — the core is pure Python 3.9+ standard library, so it runs on a fresh
-machine before Hermes is even installed there. Or carry the single self-contained file:
+machine before Hermes is even installed there. Not on PyPI yet: until the first upload,
+install straight from the repo (`pipx install "git+https://github.com/ClintMoody/Talaria"`).
+Or carry the single self-contained file:
 
 ```bash
 python3 talaria.pyz                      # ~430 KiB, runs on any Python
@@ -127,7 +129,27 @@ Every row traces to a documented weakness of the other Hermes migration tool
 | Apply | ❌ extract over live install | ✅ transactional, journaled, auto-rollback |
 | Zip-slip / bombs | ❌ broken prefix guard | ✅ full hardening + adversarial tests |
 | Verification | ❌ none | ✅ per-file hashes + health checks |
-| Tests | ❌ none | ✅ 272 (unit, integration, crash-injection, GUI, browser, adversarial) |
+| Tests | ❌ none | ✅ 283 (unit, integration, crash-injection, GUI, browser, adversarial) |
+
+## How this differs from Hermes' own backup
+
+Hermes now ships migration tools of its own, so be clear about what you'd be choosing
+between. Verified against Hermes v0.22.5:
+
+| | `hermes backup` / `import` | `hermes profile export` / `import` | **Talaria** |
+|---|:---:|:---:|:---:|
+| Scope | whole install, excludes `hermes-agent` | one profile | whole install + profiles |
+| Restores onto a *different machine* | same-machine backup/restore | ✅ | ✅ |
+| Cross-OS (Windows, Termux, WSL) | ⚠️ no rewrite | ⚠️ no rewrite | ✅ structural rewrite |
+| Verification | SQLite integrity only | ❌ none | ✅ per-file SHA-256 + health checks |
+| Rollback / undo | ❌ | ❌ | ✅ journaled, auto-rollback |
+| Knows what it's carrying | ❌ zip of files | ❌ copy of dirs | ✅ typed catalog, `why` per path |
+| Dependency verdicts per target OS | ❌ | ❌ | ✅ offline capable |
+| Secrets | ❌ included in the zip | redacted, excluded | ✅ excluded + checklist, or vault |
+
+`hermes backup` is the right tool for a same-machine snapshot and is faster for that. Use
+Talaria when the destination is a *different* machine, a different OS, or a machine whose
+Hermes version differs — and when you want to know what moved, and to be able to undo it.
 
 ## Prefer the terminal?
 

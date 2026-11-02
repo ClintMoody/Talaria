@@ -26,7 +26,7 @@ from talaria.errors import (
 )
 from talaria.events import EventLog, human_sink, ndjson_sink
 
-HERMES_KNOWLEDGE = "hermes-agent 0.20.1 / v2026.8.13"
+HERMES_KNOWLEDGE = "hermes-agent 0.22.5 / v2026.10.23"
 
 
 def main(argv: Optional[List[str]] = None) -> int:
