@@ -207,6 +207,16 @@ def _record_file(entry, rel_parts: Tuple[str, ...], profile: str,
 
     fe = FileEntry(home_rel=rel_posix, size=size, mode=mode, mtime=mtime,
                    is_symlink=symlink)
+    if symlink:
+        # Record WHAT the link points at, verbatim. Reading it is not "following" it: the
+        # walker still never descends or opens the target (R-SCAN-05), but without the
+        # target the link cannot be rebuilt, and Hermes' own profile export preserves
+        # symlinks (copytree(symlinks=True)) so dropping them here loses real content:
+        # a skills/<name> link is how an out-of-tree skill is INSTALLED.
+        try:
+            fe.link_target = os.readlink(entry.path)
+        except OSError:
+            fe.link_target = None
     if not symlink and (rel_posix.endswith(".db") or rel_posix.endswith(".sqlite")):
         fe.is_sqlite = is_sqlite_file(Path(entry.path))
 

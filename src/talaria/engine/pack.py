@@ -147,12 +147,22 @@ class _PlanEntry:
 
 
 @dataclass
+class _SymlinkEntry:
+    """A symlink to recreate on the target: a path plus the target string it stores."""
+    root_rel: str             # path relative to HERMES root (with profiles/<n>/ prefix)
+    home_rel: str             # profile-local path
+    target: str               # the link's stored target, verbatim
+    artifact: Artifact
+
+
+@dataclass
 class _Plan:
     entries: List[_PlanEntry] = field(default_factory=list)
     vault_entries: List[_PlanEntry] = field(default_factory=list)
     total_bytes: int = 0
     checklist: List[dict] = field(default_factory=list)
     external_entries: List[_PlanEntry] = field(default_factory=list)
+    symlinks: List[_SymlinkEntry] = field(default_factory=list)
 
 
 def _root_rel(artifact: Artifact, home_rel: str) -> str:
@@ -172,6 +182,15 @@ def _build_plan(scan_result: ScanResult, options: PackOptions, log: EventLog) ->
         vaulted_content = options.lock_everything and art.secrecy == "content" and vault_on
         for fe in art.files:
             if fe.is_symlink:
+                # A symlink carries a TARGET, not content, so it has no payload member and no
+                # hash. It is recorded in the manifest's symlinks[] section (see docs/
+                # bundle-format.md) and recreated on apply. Dropping it here is what lost
+                # every skill installed as a link (skills/<name> -> an out-of-tree repo).
+                if fe.link_target:
+                    root_rel = _root_rel(art, fe.home_rel)
+                    plan.symlinks.append(_SymlinkEntry(
+                        root_rel=root_rel, home_rel=fe.home_rel,
+                        target=fe.link_target, artifact=art))
                 continue
             root_rel = _root_rel(art, fe.home_rel)
             source = root / root_rel
@@ -399,6 +418,9 @@ def _write_zip(scan_result: ScanResult, plan: _Plan, options: PackOptions,
                 for a in scan_result.artifacts if a.kind == "unrecognized" and a.travels
                 for f in a.files],
             "vault": vault_section or {"present": False},
+            "symlinks": [{"root_rel": s.root_rel, "home_rel": s.home_rel,
+                          "target": s.target}
+                         for s in plan.symlinks],
             "compat": {"config_floor": 12, "notes": ident.notes},
             "capture_mode": scan_result.capture_mode,
             "hash_semantics": semantics.to_json(),

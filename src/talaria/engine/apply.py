@@ -334,6 +334,8 @@ class _Placement:
     is_credential: bool
     is_db: bool
     conflict: Optional[str] = None   # None|keep|overwrite|rename
+    #: A symlink placement carries no staged CONTENT: ``link_target`` is what to recreate.
+    link_target: Optional[str] = None
 
 
 def _stage(reader: BundleReader, manifest: dict, plan: RewritePlan, stage_dir: Path,
@@ -390,12 +392,46 @@ def _stage(reader: BundleReader, manifest: dict, plan: RewritePlan, stage_dir: P
             is_db=rec.home_rel.endswith(".db")))
 
     _stage_vault(reader, manifest, stage_dir, target_home, options, placements, outcome)
+    _stage_symlinks(manifest, target_home, stage_dir, placements, outcome, options, rename_map)
     _apply_rewrites(plan, placements, stage_dir, options, journal, outcome)
     _scrub_cron(placements, journal, outcome)
     for placement in placements:
-        placement.expected_sha = file_sha256(placement.staged)
+        # A symlink has no staged content to hash; its "expected" state is the link itself.
+        if placement.link_target is None:
+            placement.expected_sha = file_sha256(placement.staged)
     _resolve_conflicts(placements, options, outcome)
     return placements
+
+
+def _stage_symlinks(manifest: dict, target_home: Path, stage_dir: Path,
+                    placements: List["_Placement"], outcome: "ApplyOutcome",
+                    options: "ApplyOptions", rename_map: Dict[str, str]) -> None:
+    """Recreate symlinks recorded in ``manifest['symlinks']`` (additive schema-1 key).
+
+    A symlink has no payload member, so it cannot be staged by extraction: the link's
+    stored target is all there is to place. Unknown keys are ignored by every older reader
+    (docs/bundle-format.md), so bundles written before this key simply recreate nothing.
+    """
+    for i, rec in enumerate(manifest.get("symlinks") or []):
+        if not isinstance(rec, dict):
+            continue
+        root_rel = rec.get("root_rel") or ""
+        target = rec.get("target")
+        if not root_rel or not target or not isinstance(target, str):
+            continue
+        home_rel = rec.get("home_rel") or root_rel
+        exc = exclusion_for(root_rel, "apply")
+        if exc is not None:
+            outcome.skipped.append({"path": root_rel,
+                                    "reason": f"machine-bound ({exc.id}) — filtered on "
+                                              f"the apply side too"})
+            continue
+        mapped = rename_map.get(root_rel, root_rel)
+        placements.append(_Placement(
+            member=f"symlink:{root_rel}", staged=stage_dir / f"link{i:06d}",
+            final=target_home / mapped, root_rel=root_rel, expected_sha="",
+            mode=0o777, is_credential=is_credential_path(home_rel), is_db=False,
+            link_target=target))
 
 
 def _selected_artifact_ids(manifest: dict, options: ApplyOptions,
@@ -637,6 +673,21 @@ def _resolve_conflicts(placements: List[_Placement], options: ApplyOptions,
                        outcome: ApplyOutcome) -> None:
     for placement in placements:
         final = placement.final
+        # A symlink is never "the same file": exists() on a dangling link is False, and even
+        # a live link compares by target, not by content hash. Let apply replace it (the old
+        # entry is backed up first, so it is undoable either way).
+        if placement.link_target is not None:
+            if final.is_symlink():
+                policy = options.conflict_policy
+                if policy == "ask" and options.ask is not None:
+                    policy = options.ask(placement.root_rel)
+                placement.conflict = "keep" if policy == "keep" else "overwrite"
+                outcome.conflicts.append({
+                    "path": placement.root_rel, "decision": placement.conflict,
+                    "detail": "existing symlink " +
+                              ("kept" if placement.conflict == "keep" else
+                               "backed up, then replaced")})
+            continue
         if not final.exists():
             continue
         try:
@@ -675,7 +726,11 @@ def _backup(placements: List[_Placement], target_home: Path, backup_dir: Path,
     is_db_by_final = {p.final: p.is_db for p in placements}
     for placement in placements:
         final = placement.final
-        if final in seen or not final.exists():
+        if final in seen:
+            continue
+        # ``exists()`` is False for a DANGLING symlink, but the link itself must still be
+        # backed up (it is what an apply would overwrite) — so test is_symlink() too.
+        if not final.exists() and not final.is_symlink():
             continue
         seen.add(final)
         seq += 1
@@ -708,6 +763,13 @@ def _backup_one(final: Path, backup_path: Path, is_db: bool, op_id: str,
         except SqliteSnapshotError:
             used_snapshot = False
     if not used_snapshot:
+        if final.is_symlink():
+            # copy2 on a symlink copies the TARGET's bytes, so a rollback would restore a
+            # real file where a link used to be. Record the target and restore it as a link.
+            journal.write("op.done", op_id=op_id, kind="backup", final=str(final),
+                          backup=str(backup_path), backup_sha=_safe_sha(backup_path),
+                          is_db=bool(is_db), backup_symlink=os.readlink(final))
+            return
         shutil.copy2(final, backup_path)
     journal.write("op.done", op_id=op_id, kind="backup", final=str(final),
                   backup=str(backup_path), backup_sha=_safe_sha(backup_path),
@@ -723,12 +785,24 @@ def _do_apply(placements: List[_Placement], target_home: Path, journal: Journal,
         final = placement.final
         op_id = f"pl{i:05d}"
         journal.write("op.intent", op_id=op_id,
-                      kind="db_place" if placement.is_db else "replace_file",
+                      kind="symlink" if placement.link_target is not None else (
+                          "db_place" if placement.is_db else "replace_file"),
                       final=str(final), staged=str(placement.staged),
                       expected_sha=placement.expected_sha,
                       is_db=bool(placement.is_db),
-                      existed=final.exists())
+                      existed=final.exists() or final.is_symlink())
         _mkdir_secure(final.parent, target_home, placement.is_credential)
+        if placement.link_target is not None:
+            # Replace whatever is there (a file, or a link pointing elsewhere) with the
+            # recorded link. unlink first: creating over an existing file would nest a link
+            # inside it on some systems, and over an existing link os.symlink raises.
+            if final.is_symlink() or final.exists():
+                final.unlink()
+            os.symlink(placement.link_target, final)
+            journal.write("op.done", op_id=op_id, kind="symlink", final=str(final),
+                          link_target=placement.link_target)
+            outcome.placed.append(placement.root_rel)
+            continue
         if placement.is_db:
             # The pre-apply DB backup is a WAL-folded snapshot (see _backup_one), so the
             # old sidecars' committed data is already preserved and rollback restores a
@@ -834,6 +908,19 @@ def _verify_gating(placements: List[_Placement], target_home: Path, journal: Jou
         if placement.conflict == "keep":
             continue
         final = placement.final
+        if placement.link_target is not None:
+            # A link is verified by its TARGET, not by existence: a dangling link is the
+            # normal state for a skill pointing at a repo that lives on another machine
+            # until that repo is cloned, so "missing" is not a failure here (it is
+            # surfaced by preflight's external-dir verdict instead).
+            if not final.is_symlink():
+                raise TalariaError("TAL-602", f"verify: {final} is not a symlink after apply")
+            actual_target = os.readlink(final)
+            if actual_target != placement.link_target:
+                raise TalariaError(
+                    "TAL-602", f"verify: {placement.root_rel} link points at "
+                               f"{actual_target!r}, expected {placement.link_target!r}")
+            continue
         if not final.exists():
             raise TalariaError("TAL-602", f"verify: {final} missing after placement")
         if placement.expected_sha:
@@ -891,6 +978,7 @@ def rollback_journal(journal_path: Path, target_home: Path) -> List[str]:
     restored: List[str] = []
     backups: Dict[str, dict] = {}
     done_backup_sha: Dict[str, str] = {}
+    backup_symlink: Dict[str, str] = {}
     for record in records:
         if record.get("event") == "op.intent" and record.get("kind") in (
                 "backup", "delete_stale"):
@@ -898,17 +986,40 @@ def rollback_journal(journal_path: Path, target_home: Path) -> List[str]:
         if record.get("event") == "op.done" and record.get("kind") == "backup":
             if record.get("backup_sha"):
                 done_backup_sha[record["final"]] = record["backup_sha"]
+            # Recorded on op.done, not op.intent: the intent is written before we know
+            # whether the target is a link (a dangling link's stat succeeds but the link
+            # test is what tells us to restore a link rather than a copy).
+            if record.get("backup_symlink"):
+                backup_symlink[record["final"]] = record["backup_symlink"]
 
     # Every mutating op that at least reached op.intent, newest first. An op with an
     # intent but no matching done is the crashed op — still rolled back.
     intents = [r for r in records if r.get("event") == "op.intent"
-               and r.get("kind") in ("replace_file", "db_place", "delete_stale")]
+               and r.get("kind") in ("replace_file", "db_place", "delete_stale", "symlink")]
     for record in reversed(intents):
         kind = record.get("kind")
         final_str = record.get("final", "")
         final = Path(final_str)
         is_db = bool(record.get("is_db"))
-        if kind in ("replace_file", "db_place"):
+        if kind == "symlink":
+            # Undo a link: remove it (or, if something pre-existed there, put it back as
+            # whatever it was — a link or a copy of the backed-up bytes).
+            intent = backups.get(final_str)
+            if final.is_symlink() or final.exists():
+                final.unlink()
+            if intent is not None:
+                link = backup_symlink.get(final_str)
+                if link:
+                    os.symlink(link, final)
+                    restored.append(final_str + " (link restored)")
+                    continue
+                backup_path = Path(intent["backup"])
+                if backup_path.exists():
+                    shutil.copy2(backup_path, final)
+                    restored.append(final_str)
+                    continue
+            restored.append(final_str + " (link removed)")
+        elif kind in ("replace_file", "db_place"):
             intent = backups.get(final_str)
             if intent is not None and Path(intent["backup"]).exists():
                 backup_path = Path(intent["backup"])
