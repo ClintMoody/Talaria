@@ -43,6 +43,10 @@ from talaria.platform.paths import find_collisions, windows_path_problems
 
 CHUNK = 1024 * 1024
 DB_SOFT_CAP = 8 * 1024 * 1024 * 1024  # 8 GiB (`--db-cap` overrides)
+#: Following symlinks copies real content in. Real installs have ~50 links whose targets
+#: total tens of MiB (skills are markdown), but a link can also point at a huge repo, so
+#: the total is capped and anything past it stays a plain link record with a warning.
+FOLLOW_SOFT_CAP = 512 * 1024 * 1024  # 512 MiB
 
 
 @dataclass
@@ -55,6 +59,8 @@ class PackOptions:
     db_cap_confirmed: bool = False
     require_quiesced: bool = False
     hold_secrets: bool = True                # False only under --vault
+    follow_symlinks: bool = False            # flatten link targets into real files
+    follow_symlinks_cap_bytes: int = FOLLOW_SOFT_CAP
 
 
 @dataclass
@@ -163,6 +169,12 @@ class _Plan:
     checklist: List[dict] = field(default_factory=list)
     external_entries: List[_PlanEntry] = field(default_factory=list)
     symlinks: List[_SymlinkEntry] = field(default_factory=list)
+    #: root_rel prefixes that were flattened by --follow-symlinks. Recorded in the manifest
+    #: so apply knows the content is real files, NOT a link to recreate, on machines where
+    #: the target path does not exist.
+    followed: List[str] = field(default_factory=list)
+    follow_bytes: int = 0
+    followed_destinations: Set[str] = field(default_factory=set)
 
 
 def _root_rel(artifact: Artifact, home_rel: str) -> str:
@@ -188,6 +200,11 @@ def _build_plan(scan_result: ScanResult, options: PackOptions, log: EventLog) ->
                 # every skill installed as a link (skills/<name> -> an out-of-tree repo).
                 if fe.link_target:
                     root_rel = _root_rel(art, fe.home_rel)
+                    if options.follow_symlinks:
+                        followed = _follow_one(plan, root, art, fe, root_rel,
+                                               options.follow_symlinks_cap_bytes)
+                        if followed:
+                            continue
                     plan.symlinks.append(_SymlinkEntry(
                         root_rel=root_rel, home_rel=fe.home_rel,
                         target=fe.link_target, artifact=art))
@@ -215,6 +232,84 @@ def _build_plan(scan_result: ScanResult, options: PackOptions, log: EventLog) ->
 
     _plan_external(scan_result, plan, log)
     return plan
+
+
+def _follow_one(plan: "_Plan", root: Path, art: Artifact, fe, root_rel: str,
+                cap_bytes: int) -> bool:
+    """Flatten one symlink into real files under the link's own path.
+
+    ``--follow-symlinks`` exists because a bundle cannot carry a link's TARGET: hardening
+    rejects symlink members, so only the target STRING travels. On a machine where that
+    path does not exist the link lands dangling and the skill silently never loads (37 of
+    42 on a real install). Following instead writes the target's content at the link's
+    path, so the skill works anywhere, at the cost of copying instead of sharing.
+
+    Returns False when the link was left as a link record: dangling, unreadable, or past
+    the size cap.
+    """
+    target = fe.link_target
+    if target is None:
+        return False
+    resolved = (Path(target).expanduser() if target.startswith(("/", "~"))
+                else root / Path(root_rel).parent / target)
+    if not resolved.exists():
+        return False          # dangling here: nothing to copy, keep the link record
+
+    if resolved.is_dir():
+        sources = []
+        seen = set()
+        for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
+            real = os.path.realpath(dirpath)
+            if real in seen:                      # symlink cycle: do not descend twice
+                dirnames[:] = []
+                continue
+            seen.add(real)
+            dirnames.sort()
+            for name in sorted(filenames):
+                p = Path(dirpath) / name
+                # A nested link to a real file is followed (its bytes are what the user
+                # sees); a nested link to a dir was already walked by os.walk.
+                if p.is_symlink() and (not p.exists() or p.is_dir()):
+                    continue
+                sources.append(p)
+    else:
+        sources = [resolved]
+
+    sizes = []
+    for src in sources:
+        try:
+            sizes.append(os.stat(src).st_size)
+        except OSError:
+            sizes.append(0)
+    if plan.follow_bytes + sum(sizes) > cap_bytes:
+        return False                              # past the cap: stays a link record
+
+    added = 0
+    for src, size in zip(sources, sizes):
+        try:
+            rel_inside = src.relative_to(resolved) if resolved.is_dir() else Path(src.name)
+        except ValueError:
+            continue
+        dest_rel = (f"{root_rel}/{rel_inside.as_posix()}" if resolved.is_dir()
+                    else root_rel)
+        if dest_rel in plan.followed_destinations:
+            continue
+        plan.followed_destinations.add(dest_rel)
+        try:
+            st = os.stat(src)
+        except OSError:
+            continue
+        plan.entries.append(_PlanEntry(
+            member=PAYLOAD_HOME + dest_rel, source=src, root_rel=dest_rel,
+            home_rel=fe.home_rel, artifact=art, size=size, mode=st.st_mode & 0o777,
+            mtime=st.st_mtime))
+        plan.total_bytes += size
+        plan.follow_bytes += size
+        added += 1
+    if added:
+        plan.followed.append(root_rel)
+        return True
+    return False
 
 
 def _plan_external(scan_result: ScanResult, plan: _Plan, log: EventLog) -> None:
@@ -421,6 +516,11 @@ def _write_zip(scan_result: ScanResult, plan: _Plan, options: PackOptions,
             "symlinks": [{"root_rel": s.root_rel, "home_rel": s.home_rel,
                           "target": s.target}
                          for s in plan.symlinks],
+            # Additive schema-1 key: paths where --follow-symlinks wrote REAL files in
+            # place of a link. Apply needs this because on the target machine the old
+            # target path may not exist, and a plain link record would rewrite the
+            # content back into a dangling link.
+            "followed_symlinks": list(plan.followed),
             "compat": {"config_floor": 12, "notes": ident.notes},
             "capture_mode": scan_result.capture_mode,
             "hash_semantics": semantics.to_json(),

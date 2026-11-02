@@ -126,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="read the passphrase from this file (never argv)")
     p.add_argument("--require-quiesced", action="store_true")
     p.add_argument("--db-cap", type=float, default=8.0, metavar="GiB")
+    p.add_argument("--follow-symlinks", action="store_true",
+                   help="copy the CONTENT of symlink targets into the bundle instead of "
+                        "only the link (a link to a repo that does not exist on the new "
+                        "machine lands dangling and the skill never loads)")
+    p.add_argument("--follow-cap", type=float, default=None, metavar="GiB",
+                   help="total size cap for --follow-symlinks (default 0.5 GiB)")
     p.set_defaults(func=cmd_pack)
 
     p = sub.add_parser("inspect", help="look inside a bundle without applying it")
@@ -415,7 +421,11 @@ def cmd_pack(args) -> int:
                           vault_passphrase=passphrase,
                           lock_everything=args.lock_everything,
                           db_cap_bytes=int(args.db_cap * (1024 ** 3)),
-                          require_quiesced=args.require_quiesced)
+                          require_quiesced=args.require_quiesced,
+                          follow_symlinks=args.follow_symlinks,
+                          follow_symlinks_cap_bytes=int(
+                              (args.follow_cap if args.follow_cap is not None else 0.5)
+                              * (1024 ** 3)))
     pres = pack(result, out_path, options, log)
 
     from talaria.engine import checklist as cl

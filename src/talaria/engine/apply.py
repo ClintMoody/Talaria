@@ -412,12 +412,18 @@ def _stage_symlinks(manifest: dict, target_home: Path, stage_dir: Path,
     stored target is all there is to place. Unknown keys are ignored by every older reader
     (docs/bundle-format.md), so bundles written before this key simply recreate nothing.
     """
+    followed = [f for f in (manifest.get("followed_symlinks") or []) if isinstance(f, str)]
     for i, rec in enumerate(manifest.get("symlinks") or []):
         if not isinstance(rec, dict):
             continue
         root_rel = rec.get("root_rel") or ""
         target = rec.get("target")
         if not root_rel or not target or not isinstance(target, str):
+            continue
+        # --follow-symlinks wrote real files at this path; recreating the link would undo
+        # that and hand back a dangling link on a machine that lacks the old target.
+        if any(root_rel == f or root_rel.startswith(f.rstrip("/") + "/")
+               for f in followed):
             continue
         home_rel = rec.get("home_rel") or root_rel
         exc = exclusion_for(root_rel, "apply")
@@ -836,6 +842,11 @@ def _mkdir_secure(directory: Path, target_home: Path, is_credential: bool) -> No
     directory = Path(directory)
     if directory.exists():
         return
+    if directory.is_symlink():
+        # A dangling link: exists() is False, so mkdir would fail with FileExistsError.
+        # --follow-symlinks needs a real directory here (the whole point is that the old
+        # target may not exist on this machine), so replace the dead link.
+        directory.unlink()
     to_make: List[Path] = []
     probe = directory
     home_resolved = Path(target_home).resolve()

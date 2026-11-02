@@ -60,14 +60,17 @@
 ## Quick start
 
 ```bash
-pipx install talaria-hermes              # or: pip install talaria-hermes
+pipx install "git+https://github.com/ClintMoody/Talaria@v1.1.0"
 talaria                                 # opens the wizard in your browser
 ```
 
 Zero dependencies — the core is pure Python 3.9+ standard library, so it runs on a fresh
-machine before Hermes is even installed there. Not on PyPI yet: until the first upload,
-install straight from the repo (`pipx install "git+https://github.com/ClintMoody/Talaria"`).
-Or carry the single self-contained file:
+machine before Hermes is even installed there.
+
+Not on PyPI yet, so `pipx install talaria-hermes` does not work: the project is not
+uploaded, and the name `talaria` on PyPI belongs to an unrelated Django CMS. Until the
+first upload, install from the repo with the command above (pin a tag for a stable
+version). Or carry the single self-contained file, which needs no install at all:
 
 ```bash
 python3 talaria.pyz                      # ~430 KiB, runs on any Python

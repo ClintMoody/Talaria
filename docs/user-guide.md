@@ -43,12 +43,30 @@ talaria pack --yes -o /mnt/usb/move.hermespack     # zero questions
 talaria pack --vault                  # encrypted keys (prompts for passphrase)
 talaria pack --preset essentials      # identity+skills+tasks+credentials+boards
 talaria pack --exclude "cron-output@" # drop one artifact group (couples enforced)
+talaria pack --follow-symlinks        # copy link TARGETS in (see below)
 talaria scan / diff / deps / report   # look before you pack
 ```
 
 `talaria why <path>` explains any file's fate. `talaria report` writes the System
 Overview — the full picture of what your install is and touches — without packing
 anything.
+
+### Symlinked skills: link or copy
+
+Hermes installs an out-of-tree skill as a symlink (`skills/<name>` → a repo somewhere
+else). By default the bundle records the link's target string and recreates the link on
+the new machine. That is exact and cheap, but if the target path does not exist there,
+the link lands **dangling** and the skill never loads. On a real install 48 of 50 links
+pointed outside Hermes home, so 37 skills would have arrived broken.
+
+`--follow-symlinks` copies the target's actual files in at the link's own path instead,
+so those skills work anywhere. It costs space: skills are markdown, so a real install
+grows by well under a megabyte. The total is capped (`--follow-cap`, default 0.5 GiB);
+anything past the cap stays a link record. Dangling links always stay link records,
+since there is nothing to copy.
+
+Use it whenever you are moving to a machine that does not already have your skill repos
+checked out — which is most moves. `talaria deps` lists every out-of-tree link first.
 
 ## Side two: the new computer
 

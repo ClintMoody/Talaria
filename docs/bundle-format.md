@@ -55,6 +55,11 @@ version, so any tool vintage can identify any bundle and print the right message
   no content, so it has no payload member and no hash; apply recreates it, verifies it
   by target, and rollback restores it. Readers older than 1.1 ignore this key (see
   reading rules) and simply recreate nothing.
+- `followed_symlinks[]` — root-relative paths that `--follow-symlinks` flattened into
+  REAL files (the target's content sits at the link's own path, so no `symlinks[]` record
+  exists for them). Apply needs this list: on a machine where the old target path does
+  not exist, a plain link record would turn the copied content back into a dangling link.
+  Absent means nothing was followed, which is the default.
 - `hash_semantics` — the separator/collation the skill dir-hashes were computed under
   (cross-OS rebaselining needs it).
 - `capture_mode` — quiesced | live.
