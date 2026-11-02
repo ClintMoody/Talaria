@@ -48,6 +48,24 @@ and artifact ids for skills are now unique.
   and `state/`, `briefings/`, `pets/`, `attachments/`, `pending/`, `specs/`, `plans/`,
   `output/` and the active-profile files are classified instead of being unrecognized.
   Unrecognized files on a real install dropped from 23,177 to 4,467.
+- **Non-core directories under `HERMES_HOME` are accounted for.** The standalone web UI
+  keeps 3.1 GB of app data in `webui/` (sessions, attachments, model cache); Hermes core
+  never reads that path, so it had been scanned as unrecognized and travelled as
+  record-only: silently dropped from every bundle. It is now carried as app data. Sidecar
+  tooling that watches Hermes rather than being part of it (`lcm-monitor/`, `scratch/`)
+  and stale pre-cutover database copies (`state.db.bak-*`, `.broken-*`, `.corrupt-*`,
+  `.recovered-*`) are classified and left behind on purpose: they are large, and a
+  restore that lands an old database copy can leave Hermes unsure which one is current.
+  Unrecognized on a real install dropped from 12.3 GB to 142 MB.
+- **Out-of-tree symlinks are reported as dependencies.** Of 50 symlinks on a real
+  install, 48 point outside `HERMES_HOME` (to skill repos under `PROJECTS/`, `.agents/`,
+  plugin checkouts). The bundle carries the link record but by design cannot carry the
+  target, so 37 of 42 linked skills landed dangling on a fresh-machine apply and would
+  never load. `talaria deps` now lists each one with its target and remediation, and the
+  per-OS verdict is `action`, never `ok`. Hermes' own `profile export` has the same hole;
+  the difference is that Talaria tells you.
+- `talaria diff` defaults to `skills`; bare invocation used to exit with a dead-end
+  "the following arguments are required: what".
 - Docs updated for the new layout; research notes keep the version they were written
   against.
 
