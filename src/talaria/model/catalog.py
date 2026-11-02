@@ -462,6 +462,28 @@ KIND_RULES: Tuple[KindRule, ...] = (
     # catch remaining known-noise
     KindRule("context-cache", "configuration", ("context_length_cache.yaml",), "c", "none",
              "never", machine_bound=True, reason="regeneratable model-context cache"),
+
+    # --- dirs that live under HERMES_HOME but are NOT Hermes core ---------------------
+    # The standalone web UI keeps its own app data here (sessions, attachments, the login
+    # key). Hermes core never reads this path (no reference in hermes_cli/ or agent/), so
+    # it is app data, not state: it travels, but never as a plaintext credential.
+    KindRule("webui-app", "webui", ("webui/**",), "b", "content", "on", group_dir=2,
+             reason="web UI app data: sessions, attachments, model cache"),
+    # Tooling that watches Hermes rather than being part of it. lcm-monitor keeps its own
+    # snapshots (GBs of them); the guard ledger is diagnostics.
+    KindRule("sidecar-tooling", "runtime-ephemera", ("lcm-monitor/**",), "c", "none",
+             "never", machine_bound=True,
+             reason="external monitor snapshots and logs; rebuilt on the new machine"),
+    KindRule("scratch-space", "runtime-ephemera", ("scratch/**",), "c", "none", "never",
+             machine_bound=True, reason="throwaway scratch working dir"),
+    # Pre-cutover database copies. This is exactly the kind of thing a migration must not
+    # drag along: they are large, stale, and a restore that lands them can confuse Hermes
+    # about which database is current.
+    KindRule("db-graveyard", "runtime-ephemera",
+             ("state.db.bak-*", "state.db.broken-*", "state.db.original-*",
+              "state.db.corrupt-*", "state.db.recovered-*", "state.db.retired-*",
+              "hermes_state.db.bak-*"), "c", "content", "never", machine_bound=True,
+             group_dir=1, reason="stale pre-cutover database copies"),
 )
 
 UNRECOGNIZED_KIND = "unrecognized"

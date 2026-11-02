@@ -107,6 +107,29 @@ class TestClassify:
         assert classify("cron/output/a1b2/x.md").group_key == "cron/output/a1b2"
         assert classify("scripts/check_site.sh").kind == "scripts-dir"
 
+    def test_non_core_dirs_under_hermes_home(self):
+        # These live under HERMES_HOME but are not Hermes core. Left unrecognized they were
+        # either silently dropped (record_only) or, worse, carried as plaintext: the web UI
+        # directory alone is 3.1 GB on a real install.
+        webui = classify("webui/sessions/a.json")
+        assert webui.kind == "webui-app" and webui.default == "on"
+        assert webui.secrecy == "content", "app data, but never treated as a credential"
+        assert classify("webui/models_cache.json").kind == "webui-app"
+        assert classify("lcm-monitor/snapshots/x/lcm.db").default == "never"
+        assert classify("scratch/foo/state.db").default == "never"
+
+    def test_stale_db_copies_never_travel(self):
+        # A migration must not drag old database copies along: they are large and a restore
+        # that lands one can leave Hermes unsure which database is current.
+        for rel in ("state.db.bak-20260827-cutover", "state.db.broken-2026-05-26",
+                    "state.db.original-broken-2026-05-26",
+                    "state.db.corrupt-20260518-181849.bak",
+                    "state.db.recovered-from-may23"):
+            c = classify(rel)
+            assert c.kind == "db-graveyard", rel
+            assert c.default == "never", rel
+        assert classify("state.db").kind == "state-db", "the live DB must be unaffected"
+
     def test_conversations(self):
         assert classify("state.db").kind == "state-db"
         assert classify("state.db").secrecy == "content"
