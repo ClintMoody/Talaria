@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.0 — 2026-11-01
+
+Two follow-ups from using 1.1.0 on a real install, both about telling the truth: one flag
+that makes linked skills actually survive a move, and an install command that exists.
+
+- **`--follow-symlinks`.** A bundle cannot carry a symlink's target (hardening rejects
+  symlink members), so only the target string travels and the link is recreated on the
+  new machine. That is exact, but if the target path does not exist there the link lands
+  dangling and the skill never loads. On a real install 48 of 50 links pointed outside
+  `HERMES_HOME`, so 37 skills arrived broken. Following copies the target's real files in
+  at the link's own path instead. Costs under a megabyte for all 45 links on a real
+  install. Dangling links stay link records, nested cycles are walked once, relative
+  targets resolve against the link directory, and `--follow-cap` (default 0.5 GiB) leaves
+  anything larger as a link. Verified end to end: 12,442 members packed, applied to a
+  fresh home with 0 symlinks and 0 dangling, then verified with Hermes answering.
+- **The install instructions pointed at a package that does not exist.** The quick start
+  offered `pipx install talaria-hermes` and then said "Not on PyPI yet" three lines
+  later. Checked the live index: `talaria-hermes` is 404, and `talaria` is an unrelated
+  Django CMS (0.2.0). The docs now give the one command that works, pinned to a tag, and
+  say why the obvious names are unusable.
+- Manifest gains the additive `followed_symlinks[]`; schema stays 1.
+
 ## 1.1.0 — 2026-11-01
 
 Brought Talaria's model of Hermes up from 0.20.1 to **0.22.5** (released 2026-10-23),

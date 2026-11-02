@@ -5,7 +5,7 @@ bundle and restores it on another, across Windows, macOS, and Linux — with pro
 diffing, dependency feasibility analysis, and transactional apply.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 BUNDLE_FORMAT_VERSION = 1
 BUNDLE_EXTENSION = ".hermespack"

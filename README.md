@@ -60,7 +60,7 @@
 ## Quick start
 
 ```bash
-pipx install "git+https://github.com/ClintMoody/Talaria@v1.1.0"
+pipx install "git+https://github.com/ClintMoody/Talaria@v1.2.0"
 talaria                                 # opens the wizard in your browser
 ```
 
